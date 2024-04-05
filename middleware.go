@@ -2,8 +2,9 @@ package ginprometheus
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -11,103 +12,55 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/samber/lo"
 	log "github.com/sirupsen/logrus"
 )
 
-var defaultMetricPath = "/metrics"
-
-// Standard default metrics
-//	counter, counter_vec, gauge, gauge_vec,
-//	histogram, histogram_vec, summary, summary_vec
-var reqCnt = &Metric{
-	ID:          "reqCnt",
-	Name:        "requests_total",
-	Description: "How many HTTP requests processed, partitioned by status code and HTTP method.",
-	Type:        "counter_vec",
-	Args:        []string{"code", "method", "handler", "host", "url"}}
-
-var reqDur = &Metric{
-	ID:          "reqDur",
-	Name:        "request_duration_seconds",
-	Description: "The HTTP request latencies in seconds.",
-	Type:        "histogram_vec",
-	Args:        []string{"code", "method", "url"},
-}
-
-var resSz = &Metric{
-	ID:          "resSz",
-	Name:        "response_size_bytes",
-	Description: "The HTTP response sizes in bytes.",
-	Type:        "summary"}
-
-var reqSz = &Metric{
-	ID:          "reqSz",
-	Name:        "request_size_bytes",
-	Description: "The HTTP request sizes in bytes.",
-	Type:        "summary"}
-
-var standardMetrics = []*Metric{
-	reqCnt,
-	reqDur,
-	resSz,
-	reqSz,
-}
+const (
+	defaultNamespace  = "http"
+	defaultMetricPath = "/metrics"
+)
 
 /*
-RequestCounterURLLabelMappingFn is a function which can be supplied to the middleware to control
-the cardinality of the request counter's "url" label, which might be required in some contexts.
-For instance, if for a "/customer/:name" route you don't want to generate a time series for every
-possible customer name, you could use this function:
-
-func(c *gin.Context) string {
-	url := c.Request.URL.Path
-	for _, p := range c.Params {
-		if p.Key == "name" {
-			url = strings.Replace(url, p.Value, ":name", 1)
-			break
-		}
-	}
-	return url
-}
-
-which would map "/customer/alice" and "/customer/bob" to their template "/customer/:name".
+RequestUrlGetter is a function which can be supplied to the middleware to control
+the URL label in the prometheus metrics. By default, the full URL is used. This function can be
+used to redact sensitive information from the URL. For example, you could use this function to
+replace all instances of an ID with the string ":id". This function is called once per request.
 */
-type RequestCounterURLLabelMappingFn func(c *gin.Context) string
+type RequestUrlGetter func(c *gin.Context) string
 
 // Metric is a definition for the name, description, type, ID, and
 // prometheus.Collector type (i.e. CounterVec, Summary, etc) of each metric
 type Metric struct {
 	MetricCollector prometheus.Collector
-	ID              string
 	Name            string
 	Description     string
-	Type            string
+	Type            MetricType
 	Args            []string
+	Bucket          []float64
 }
 
 // Prometheus contains the metrics gathered by the instance and its path
 type Prometheus struct {
-	reqCnt        *prometheus.CounterVec
-	reqDur        *prometheus.HistogramVec
-	reqSz, resSz  prometheus.Summary
-	router        *gin.Engine
-	listenAddress string
-	Ppg           PrometheusPushGateway
-
-	MetricsList []*Metric
-	MetricsPath string
-
-	ReqCntURLLabelMappingFn RequestCounterURLLabelMappingFn
-
-	// gin.Context string to use as a prometheus URL label
-	URLLabelFromContext string
+	namespace                 string
+	subsystem                 string
+	requestCount              *prometheus.CounterVec
+	requestDurationSeconds    *prometheus.HistogramVec
+	requestSize, responseSize prometheus.SummaryVec
+	router                    *gin.Engine
+	listenAddress             string
+	Ppg                       PrometheusPushGateway
+	metricsList               []*Metric
+	metricsPath               string
+	requestUrlGetter          RequestUrlGetter
+	excludedPaths              []string
 }
 
 // PrometheusPushGateway contains the configuration for pushing to a Prometheus pushgateway (optional)
 type PrometheusPushGateway struct {
 
 	// Push interval in seconds
-	PushIntervalSeconds time.Duration
+	PushInterval time.Duration
 
 	// Push Gateway URL in format http://domain:port
 	// where JOBNAME can be any string of your choice
@@ -121,40 +74,37 @@ type PrometheusPushGateway struct {
 	Job string
 }
 
-// NewPrometheus generates a new set of metrics with a certain subsystem name
-func NewPrometheus(subsystem string, customMetricsList ...[]*Metric) *Prometheus {
+// NewPrometheus generates a new set of metrics
+func NewPrometheus(opts ...Options) *Prometheus {
 
-	var metricsList []*Metric
-
-	if len(customMetricsList) > 1 {
-		panic("Too many args. NewPrometheus( string, <optional []*Metric> ).")
-	} else if len(customMetricsList) == 1 {
-		metricsList = customMetricsList[0]
-	}
-
-	for _, metric := range standardMetrics {
-		metricsList = append(metricsList, metric)
-	}
+	var metricsList = []*Metric{}
+	copy(metricsList, standardMetrics)
 
 	p := &Prometheus{
-		MetricsList: metricsList,
-		MetricsPath: defaultMetricPath,
-		ReqCntURLLabelMappingFn: func(c *gin.Context) string {
-			return c.Request.URL.Path // i.e. by default do nothing, i.e. return URL as is
+		namespace:   defaultNamespace,
+		metricsList: metricsList,
+		metricsPath: defaultMetricPath,
+		requestUrlGetter: func(c *gin.Context) string {
+			return c.FullPath()
 		},
+		excludedPaths: []string{defaultMetricPath},
 	}
 
-	p.registerMetrics(subsystem)
+	for _, opt := range opts {
+		opt.apply(p)
+	}
+
+	p.registerMetrics(p.namespace, p.subsystem)
 
 	return p
 }
 
 // SetPushGateway sends metrics to a remote pushgateway exposed on pushGatewayURL
 // every pushIntervalSeconds. Metrics are fetched from metricsURL
-func (p *Prometheus) SetPushGateway(pushGatewayURL, metricsURL string, pushIntervalSeconds time.Duration) {
+func (p *Prometheus) SetPushGateway(pushGatewayURL, metricsURL string, pushInterval time.Duration) {
 	p.Ppg.PushGatewayURL = pushGatewayURL
 	p.Ppg.MetricsURL = metricsURL
-	p.Ppg.PushIntervalSeconds = pushIntervalSeconds
+	p.Ppg.PushInterval = pushInterval
 	p.startPushTicker()
 }
 
@@ -185,10 +135,10 @@ func (p *Prometheus) SetListenAddressWithRouter(listenAddress string, r *gin.Eng
 func (p *Prometheus) SetMetricsPath(e *gin.Engine) {
 
 	if p.listenAddress != "" {
-		p.router.GET(p.MetricsPath, prometheusHandler())
+		p.router.GET(p.metricsPath, prometheusHandler())
 		p.runServer()
 	} else {
-		e.GET(p.MetricsPath, prometheusHandler())
+		e.GET(p.metricsPath, prometheusHandler())
 	}
 }
 
@@ -196,10 +146,10 @@ func (p *Prometheus) SetMetricsPath(e *gin.Engine) {
 func (p *Prometheus) SetMetricsPathWithAuth(e *gin.Engine, accounts gin.Accounts) {
 
 	if p.listenAddress != "" {
-		p.router.GET(p.MetricsPath, gin.BasicAuth(accounts), prometheusHandler())
+		p.router.GET(p.metricsPath, gin.BasicAuth(accounts), prometheusHandler())
 		p.runServer()
 	} else {
-		e.GET(p.MetricsPath, gin.BasicAuth(accounts), prometheusHandler())
+		e.GET(p.metricsPath, gin.BasicAuth(accounts), prometheusHandler())
 	}
 
 }
@@ -211,10 +161,19 @@ func (p *Prometheus) runServer() {
 }
 
 func (p *Prometheus) getMetrics() []byte {
-	response, _ := http.Get(p.Ppg.MetricsURL)
+	response, err := http.Get(p.Ppg.MetricsURL)
+	if err != nil {
+		log.WithError(err).Errorln("Error fetching metrics")
+		return nil
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		log.WithError(err).Errorln("Error reading response body")
+		return nil
+	}
 
 	defer response.Body.Close()
-	body, _ := ioutil.ReadAll(response.Body)
 
 	return body
 }
@@ -224,11 +183,15 @@ func (p *Prometheus) getPushGatewayURL() string {
 	if p.Ppg.Job == "" {
 		p.Ppg.Job = "gin"
 	}
-	return p.Ppg.PushGatewayURL + "/metrics/job/" + p.Ppg.Job + "/instance/" + h
+	return p.Ppg.PushGatewayURL + "/metrics/job/" + url.PathEscape(p.Ppg.Job) + "/instance/" + url.PathEscape(h)
 }
 
 func (p *Prometheus) sendMetricsToPushGateway(metrics []byte) {
 	req, err := http.NewRequest("POST", p.getPushGatewayURL(), bytes.NewBuffer(metrics))
+	if err != nil {
+		log.WithError(err).Errorln("Error creating request to push gateway")
+		return
+	}
 	client := &http.Client{}
 	if _, err = client.Do(req); err != nil {
 		log.WithError(err).Errorln("Error sending to push gateway")
@@ -236,7 +199,7 @@ func (p *Prometheus) sendMetricsToPushGateway(metrics []byte) {
 }
 
 func (p *Prometheus) startPushTicker() {
-	ticker := time.NewTicker(time.Second * p.Ppg.PushIntervalSeconds)
+	ticker := time.NewTicker(time.Second * p.Ppg.PushInterval)
 	go func() {
 		for range ticker.C {
 			p.sendMetricsToPushGateway(p.getMetrics())
@@ -245,72 +208,89 @@ func (p *Prometheus) startPushTicker() {
 }
 
 // NewMetric associates prometheus.Collector based on Metric.Type
-func NewMetric(m *Metric, subsystem string) prometheus.Collector {
+func NewMetric(m *Metric, namespace, subsystem string) prometheus.Collector {
 	var metric prometheus.Collector
 	switch m.Type {
-	case "counter_vec":
+	case CounterVec:
 		metric = prometheus.NewCounterVec(
 			prometheus.CounterOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
 			},
 			m.Args,
 		)
-	case "counter":
+	case Counter:
 		metric = prometheus.NewCounter(
 			prometheus.CounterOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
 			},
 		)
-	case "gauge_vec":
+	case GaugeVec:
 		metric = prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
 			},
 			m.Args,
 		)
-	case "gauge":
+	case Gauge:
 		metric = prometheus.NewGauge(
 			prometheus.GaugeOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
 			},
 		)
-	case "histogram_vec":
+	case HistogramVec:
+		if m.Bucket == nil {
+			m.Bucket = prometheus.DefBuckets
+		}
 		metric = prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
+				Buckets:   m.Bucket,
 			},
 			m.Args,
 		)
-	case "histogram":
+	case Histogram:
+		if m.Bucket == nil {
+			m.Bucket = prometheus.DefBuckets
+		}
+
 		metric = prometheus.NewHistogram(
 			prometheus.HistogramOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
+				Buckets:   m.Bucket,
 			},
 		)
-	case "summary_vec":
+	case SummaryVec:
 		metric = prometheus.NewSummaryVec(
 			prometheus.SummaryOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
 			},
 			m.Args,
 		)
-	case "summary":
+	case Summary:
 		metric = prometheus.NewSummary(
 			prometheus.SummaryOpts{
+				Namespace: namespace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -320,22 +300,22 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	return metric
 }
 
-func (p *Prometheus) registerMetrics(subsystem string) {
+func (p *Prometheus) registerMetrics(namespace, subsystem string) {
 
-	for _, metricDef := range p.MetricsList {
-		metric := NewMetric(metricDef, subsystem)
+	for _, metricDef := range p.metricsList {
+		metric := NewMetric(metricDef, namespace, subsystem)
 		if err := prometheus.Register(metric); err != nil {
 			log.WithError(err).Errorf("%s could not be registered in Prometheus", metricDef.Name)
 		}
 		switch metricDef {
-		case reqCnt:
-			p.reqCnt = metric.(*prometheus.CounterVec)
-		case reqDur:
-			p.reqDur = metric.(*prometheus.HistogramVec)
-		case resSz:
-			p.resSz = metric.(prometheus.Summary)
-		case reqSz:
-			p.reqSz = metric.(prometheus.Summary)
+		case requestCount:
+			p.requestCount = metric.(*prometheus.CounterVec)
+		case requestDurationSeconds:
+			p.requestDurationSeconds = metric.(*prometheus.HistogramVec)
+		case responseSizeBytes:
+			p.responseSize = metric.(prometheus.SummaryVec)
+		case requestSizeBytes:
+			p.requestSize = metric.(prometheus.SummaryVec)
 		}
 		metricDef.MetricCollector = metric
 	}
@@ -356,7 +336,7 @@ func (p *Prometheus) UseWithAuth(e *gin.Engine, accounts gin.Accounts) {
 // HandlerFunc defines handler function for middleware
 func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.URL.Path == p.MetricsPath {
+		if lo.Contains(p.excludedPaths, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
@@ -367,22 +347,14 @@ func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
 		c.Next()
 
 		status := strconv.Itoa(c.Writer.Status())
-		elapsed := float64(time.Since(start)) / float64(time.Second)
-		resSz := float64(c.Writer.Size())
+		elapsed := time.Since(start).Seconds()
+		resSz := c.Writer.Size()
 
-		url := p.ReqCntURLLabelMappingFn(c)
-		// jlambert Oct 2018 - sidecar specific mod
-		if len(p.URLLabelFromContext) > 0 {
-			u, found := c.Get(p.URLLabelFromContext)
-			if !found {
-				u = "unknown"
-			}
-			url = u.(string)
-		}
-		p.reqDur.WithLabelValues(status, c.Request.Method, url).Observe(elapsed)
-		p.reqCnt.WithLabelValues(status, c.Request.Method, c.HandlerName(), c.Request.Host, url).Inc()
-		p.reqSz.Observe(float64(reqSz))
-		p.resSz.Observe(resSz)
+		url := p.requestUrlGetter(c)
+		p.requestDurationSeconds.WithLabelValues(status, c.Request.Method, url).Observe(elapsed)
+		p.requestCount.WithLabelValues(status, c.Request.Method, c.HandlerName(), url).Inc()
+		p.requestSize.WithLabelValues(status, c.Request.Method, url).Observe(float64(reqSz))
+		p.responseSize.WithLabelValues(status, c.Request.Method, url).Observe(float64(resSz))
 	}
 }
 
