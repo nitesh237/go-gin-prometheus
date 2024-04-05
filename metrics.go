@@ -57,7 +57,7 @@ var requestSizeBytes = &Metric{
 var standardMetrics = []*Metric{
 	requestCount,
 	requestDurationSeconds,
-	responseSizeBytes,
+	requestSizeBytes,
 	responseSizeBytes,
 }
 
