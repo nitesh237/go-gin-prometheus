@@ -307,14 +307,14 @@ func (p *Prometheus) registerMetrics(namespace, subsystem string) {
 		if err := prometheus.Register(metric); err != nil {
 			log.WithError(err).Errorf("%s could not be registered in Prometheus", metricDef.Name)
 		}
-		switch metricDef {
-		case requestCount:
+		switch metricDef.Name {
+		case requestCount.Name:
 			p.requestCount = metric.(*prometheus.CounterVec)
-		case requestDurationSeconds:
+		case requestDurationSeconds.Name:
 			p.requestDurationSeconds = metric.(*prometheus.HistogramVec)
-		case responseSizeBytes:
+		case responseSizeBytes.Name:
 			p.responseSize = metric.(prometheus.SummaryVec)
-		case requestSizeBytes:
+		case requestSizeBytes.Name:
 			p.requestSize = metric.(prometheus.SummaryVec)
 		}
 		metricDef.MetricCollector = metric
