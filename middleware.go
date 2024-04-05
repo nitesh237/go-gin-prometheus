@@ -77,7 +77,7 @@ type PrometheusPushGateway struct {
 // NewPrometheus generates a new set of metrics
 func NewPrometheus(opts ...Options) *Prometheus {
 
-	var metricsList = []*Metric{}
+	var metricsList = make([]*Metric, len(standardMetrics))
 	copy(metricsList, standardMetrics)
 
 	p := &Prometheus{
