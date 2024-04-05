@@ -46,7 +46,7 @@ type Prometheus struct {
 	subsystem                 string
 	requestCount              *prometheus.CounterVec
 	requestDurationSeconds    *prometheus.HistogramVec
-	requestSize, responseSize prometheus.SummaryVec
+	requestSize, responseSize *prometheus.SummaryVec
 	router                    *gin.Engine
 	listenAddress             string
 	Ppg                       PrometheusPushGateway
@@ -313,9 +313,9 @@ func (p *Prometheus) registerMetrics(namespace, subsystem string) {
 		case requestDurationSeconds.Name:
 			p.requestDurationSeconds = metric.(*prometheus.HistogramVec)
 		case responseSizeBytes.Name:
-			p.responseSize = metric.(prometheus.SummaryVec)
+			p.responseSize = metric.(*prometheus.SummaryVec)
 		case requestSizeBytes.Name:
-			p.requestSize = metric.(prometheus.SummaryVec)
+			p.requestSize = metric.(*prometheus.SummaryVec)
 		}
 		metricDef.MetricCollector = metric
 	}
