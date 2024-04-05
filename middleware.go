@@ -352,7 +352,7 @@ func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
 
 		url := p.requestUrlGetter(c)
 		p.requestDurationSeconds.WithLabelValues(status, c.Request.Method, url).Observe(elapsed)
-		p.requestCount.WithLabelValues(status, c.Request.Method, c.HandlerName(), url).Inc()
+		p.requestCount.WithLabelValues(status, c.Request.Method, url).Inc()
 		p.requestSize.WithLabelValues(status, c.Request.Method, url).Observe(float64(reqSz))
 		p.responseSize.WithLabelValues(status, c.Request.Method, url).Observe(float64(resSz))
 	}

@@ -18,7 +18,6 @@ const (
 const (
 	LabelCode    = "code"
 	LabelMethod  = "method"
-	LabelHandler = "handler"
 	LabelUrl     = "url"
 )
 
@@ -30,7 +29,7 @@ var requestCount = &Metric{
 	Name:        "requests_total",
 	Description: "How many HTTP requests processed, partitioned by status code and HTTP method.",
 	Type:        CounterVec,
-	Args:        []string{LabelCode, LabelMethod, LabelHandler, LabelUrl},
+	Args:        []string{LabelCode, LabelMethod, LabelUrl},
 }
 
 var requestDurationSeconds = &Metric{
