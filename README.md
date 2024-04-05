@@ -35,4 +35,4 @@ func main() {
 
 See the [example.go file](https://github.com/nitesh237/go-gin-prometheus/blob/master/example/example.go)
 
-See the [options.go file][https://github.com/nitesh237/go-gin-prometheus/blob/master/options.go]
+See the [options.go file](https://github.com/nitesh237/go-gin-prometheus/blob/master/options.go)
