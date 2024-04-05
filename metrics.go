@@ -53,11 +53,20 @@ var requestSizeBytes = &Metric{
 	Args:        []string{LabelCode, LabelMethod, LabelUrl},
 }
 
+var inFlightRequestsCount = &Metric{
+	Name:        "in_flight_requests_total",
+	Description: "The number of in-flight HTTP requests.",
+	Type:        GaugeVec,
+	Args:        []string{LabelMethod, LabelUrl},
+}
+
+
 var standardMetrics = []*Metric{
 	requestCount,
 	requestDurationSeconds,
 	requestSizeBytes,
 	responseSizeBytes,
+	inFlightRequestsCount,
 }
 
 var standardMetricName = lo.Map(standardMetrics, func(metric *Metric, index int) string {

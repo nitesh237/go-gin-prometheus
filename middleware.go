@@ -47,6 +47,7 @@ type Prometheus struct {
 	requestCount              *prometheus.CounterVec
 	requestDurationSeconds    *prometheus.HistogramVec
 	requestSize, responseSize *prometheus.SummaryVec
+	inFlightRequestsCount    *prometheus.GaugeVec
 	router                    *gin.Engine
 	listenAddress             string
 	Ppg                       PrometheusPushGateway
@@ -316,6 +317,8 @@ func (p *Prometheus) registerMetrics(namespace, subsystem string) {
 			p.responseSize = metric.(*prometheus.SummaryVec)
 		case requestSizeBytes.Name:
 			p.requestSize = metric.(*prometheus.SummaryVec)
+		case inFlightRequestsCount.Name:
+			p.inFlightRequestsCount = metric.(*prometheus.GaugeVec)
 		}
 		metricDef.MetricCollector = metric
 	}
@@ -343,14 +346,13 @@ func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
 
 		start := time.Now()
 		reqSz := computeApproximateRequestSize(c.Request)
-
+		url := p.requestUrlGetter(c)
+		p.inFlightRequestsCount.WithLabelValues(c.Request.Method, url).Inc()
 		c.Next()
-
+		p.inFlightRequestsCount.WithLabelValues(c.Request.Method, url).Dec()
 		status := strconv.Itoa(c.Writer.Status())
 		elapsed := time.Since(start).Seconds()
 		resSz := c.Writer.Size()
-
-		url := p.requestUrlGetter(c)
 		p.requestDurationSeconds.WithLabelValues(status, c.Request.Method, url).Observe(elapsed)
 		p.requestCount.WithLabelValues(status, c.Request.Method, url).Inc()
 		p.requestSize.WithLabelValues(status, c.Request.Method, url).Observe(float64(reqSz))
